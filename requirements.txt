@@ -1,0 +1,5 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+python-telegram-bot==22.8
+httpx==0.28.1
+qrcode[pil]==8.2
