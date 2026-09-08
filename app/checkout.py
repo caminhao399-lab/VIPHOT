@@ -1,12 +1,9 @@
-import hashlib
-import hmac
 import os
-import time
 import uuid
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
 
@@ -15,7 +12,6 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 BRAVOPAY_API_KEY = os.getenv("BRAVOPAY_API_KEY", "").strip()
 BRAVOPAY_BASE_URL = os.getenv("BRAVOPAY_BASE_URL", "https://bravopay.club/api/v1").strip().rstrip("/")
-BRAVOPAY_WEBHOOK_SECRET = os.getenv("BRAVOPAY_WEBHOOK_SECRET", "").strip()
 BRAVOPAY_PRODUCT_ID = os.getenv("BRAVOPAY_PRODUCT_ID", "").strip()
 
 PLANS = {
@@ -105,7 +101,6 @@ async def create_checkout_payment(data: CheckoutRequest):
 
     external_reference = f"web:{uuid.uuid4().hex}"
     payload: dict[str, Any] = {
-        # O preço é definido no servidor, nunca pelo navegador.
         "amount_cents": plan["amount_cents"],
         "method": "pix",
         "customer": {
@@ -120,7 +115,7 @@ async def create_checkout_payment(data: CheckoutRequest):
         "metadata": {"checkout": "viphot_web", "plan": data.plan_id},
     }
 
-    # Se UTMify estiver sendo usado, envie o ID REAL do produto BravoPay.
+    # Quando UTMify for usado, envie o ID REAL do produto BravoPay.
     if BRAVOPAY_PRODUCT_ID:
         payload["product_id"] = BRAVOPAY_PRODUCT_ID
 
@@ -140,10 +135,7 @@ async def create_checkout_payment(data: CheckoutRequest):
         "transaction_id": tx["id"],
         "status": tx.get("status", "PENDING"),
         "amount_cents": tx.get("amount_cents", plan["amount_cents"]),
-        "pix": {
-            "copy_paste": copy_paste,
-            "expires_at": pix.get("expires_at"),
-        },
+        "pix": {"copy_paste": copy_paste, "expires_at": pix.get("expires_at")},
     }
 
 
@@ -157,48 +149,3 @@ async def checkout_payment_status(transaction_id: str):
         "status": str(tx.get("status", "UNKNOWN")).upper(),
         "paid": str(tx.get("status", "")).upper() == "PAID",
     }
-
-
-def valid_signature(raw_body: bytes, header: str) -> bool:
-    if not BRAVOPAY_WEBHOOK_SECRET or not header:
-        return False
-    try:
-        parts = {}
-        for item in header.split(","):
-            if "=" in item:
-                key, value = item.split("=", 1)
-                parts[key.strip()] = value.strip()
-        timestamp = int(parts.get("t", "0"))
-        signature = parts.get("v1", "")
-        if not timestamp or abs(time.time() - timestamp) > 300:
-            return False
-        signed = f"{timestamp}.".encode() + raw_body
-        expected = hmac.new(BRAVOPAY_WEBHOOK_SECRET.encode(), signed, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, signature)
-    except (ValueError, TypeError):
-        return False
-
-
-@router.post("/webhooks/bravopay")
-async def checkout_webhook(request: Request):
-    raw = await request.body()
-    signature = request.headers.get("BravoPay-Signature") or request.headers.get("X-Bravopay-Signature", "")
-    if not valid_signature(raw, signature):
-        raise HTTPException(401, "Assinatura de webhook inválida.")
-
-    try:
-        event = await request.json()
-    except Exception as exc:
-        raise HTTPException(400, "JSON inválido.") from exc
-
-    event_type = event.get("type") or event.get("event")
-    tx = event.get("data") or event.get("transaction") or {}
-
-    # A confirmação definitiva da venda deve ser tratada aqui.
-    if event_type == "transaction.paid":
-        transaction_id = tx.get("id")
-        external_reference = tx.get("external_reference")
-        print(f"[BravoPay webhook] PAID transaction={transaction_id} reference={external_reference}")
-        # TODO: persistir pedido como PAID e, se desejado, liberar o acesso.
-
-    return {"ok": True}
