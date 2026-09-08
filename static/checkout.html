@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VIPHOT — Checkout PIX</title>
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <style>
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Arial,sans-serif;background:#0d0d12;color:#fff;display:flex;justify-content:center;align-items:center;padding:20px}.card{width:100%;max-width:520px;background:#17171f;border:1px solid #292936;border-radius:18px;padding:28px;box-shadow:0 20px 70px #0008}h1{text-align:center;margin:0 0 8px}.sub{text-align:center;color:#aaa;margin-bottom:24px}label{display:block;margin:14px 0 6px;font-size:14px}input,select{width:100%;padding:13px;border:1px solid #363642;border-radius:9px;background:#101016;color:#fff}button{width:100%;padding:14px;margin-top:18px;border:0;border-radius:10px;background:#8f5cff;color:#fff;font-weight:700;font-size:16px;cursor:pointer}button:disabled{opacity:.6}.hidden{display:none}.pix{text-align:center;margin-top:25px}.amount{font-size:24px;font-weight:700;margin:10px}.qr{display:inline-block;background:#fff;padding:14px;border-radius:12px;margin:14px 0}textarea{width:100%;min-height:110px;padding:12px;border-radius:9px;background:#101016;color:#fff;border:1px solid #363642;resize:none}.secondary{background:#292934}.status{text-align:center;color:#bbb;margin-top:15px}.ok{color:#55e18b}.err{color:#ff7070}small{display:block;color:#888;margin-top:14px;text-align:center}
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Pagamento PIX</h1>
+  <div class="sub">Área exclusiva para maiores de 18 anos.</div>
+
+  <form id="form">
+    <label for="plan">Plano</label>
+    <select id="plan" required>
+      <option value="essential">VIP Essencial — R$ 8,00</option>
+      <option value="premium">VIP Premium — R$ 14,90</option>
+      <option value="acervo">VIP Premium + Acervo — R$ 16,90</option>
+      <option value="full">Acesso Full + Bônus — R$ 23,90</option>
+    </select>
+
+    <label for="name">Nome</label>
+    <input id="name" autocomplete="name" required>
+
+    <label for="email">E-mail</label>
+    <input id="email" type="email" autocomplete="email" required>
+
+    <label for="phone">Telefone</label>
+    <input id="phone" autocomplete="tel" placeholder="5511999999999" required>
+
+    <label for="cpf">CPF</label>
+    <input id="cpf" inputmode="numeric" placeholder="Somente números" required>
+
+    <button id="pay" type="submit">Gerar PIX</button>
+    <div id="error" class="err"></div>
+    <small>Se você usa UTMify, os parâmetros de campanha são preservados e enviados à BravoPay.</small>
+  </form>
+
+  <section id="pix" class="pix hidden">
+    <div class="amount" id="amount"></div>
+    <div>Escaneie o QR Code ou use o código copia-e-cola.</div>
+    <div id="qr" class="qr"></div>
+    <textarea id="copy" readonly></textarea>
+    <button id="copyBtn" class="secondary" type="button">Copiar código PIX</button>
+    <div id="status" class="status">Aguardando pagamento...</div>
+  </section>
+</div>
+<script>
+const UTM_KEY='viphot_utm';
+const UTM_PARAMS=['utm_source','utm_medium','utm_campaign','utm_content','utm_term','fbclid','ttclid','gclid'];
+function captureUtm(){
+  const p=new URLSearchParams(location.search); const old=JSON.parse(localStorage.getItem(UTM_KEY)||'{}');
+  for(const k of UTM_PARAMS){const v=p.get(k);if(v) old[k]=v.slice(0,500)}
+  localStorage.setItem(UTM_KEY,JSON.stringify(old)); return old;
+}
+function bravoUtm(){const x=JSON.parse(localStorage.getItem(UTM_KEY)||'{}');return {source:x.utm_source||'',medium:x.utm_medium||'',campaign:x.utm_campaign||'',content:x.utm_content||'',term:x.utm_term||'',fbclid:x.fbclid||'',ttclid:x.ttclid||'',gclid:x.gclid||''}}
+captureUtm();
+const form=document.getElementById('form'), pix=document.getElementById('pix'), error=document.getElementById('error'), pay=document.getElementById('pay');
+const statusEl=document.getElementById('status'); let txId=null, timer=null;
+document.getElementById('cpf').addEventListener('input',e=>e.target.value=e.target.value.replace(/\D/g,''));
+document.getElementById('copyBtn').addEventListener('click',async()=>{const b=document.getElementById('copyBtn');try{await navigator.clipboard.writeText(document.getElementById('copy').value);b.textContent='Copiado!';setTimeout(()=>b.textContent='Copiar código PIX',1800)}catch{document.getElementById('copy').select();document.execCommand('copy')}});
+form.addEventListener('submit',async e=>{
+  e.preventDefault(); error.textContent=''; pay.disabled=true; pay.textContent='Gerando PIX...';
+  const body={plan_id:document.getElementById('plan').value,customer:{name:document.getElementById('name').value.trim(),email:document.getElementById('email').value.trim(),phone:document.getElementById('phone').value.trim(),cpf:document.getElementById('cpf').value},utm:bravoUtm()};
+  try{
+    const r=await fetch('/api/checkout/payment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||d.error||'Não foi possível gerar o PIX.');
+    txId=d.transaction_id; document.getElementById('amount').textContent=(d.amount_cents/100).toLocaleString('pt-BR',{style:'currency',currency:'BRL'}); document.getElementById('copy').value=d.pix.copy_paste;
+    document.getElementById('qr').innerHTML=''; new QRCode(document.getElementById('qr'),{text:d.pix.copy_paste,width:260,height:260}); form.classList.add('hidden'); pix.classList.remove('hidden'); startPolling();
+  }catch(err){error.textContent=err.message;pay.disabled=false;pay.textContent='Gerar PIX'}
+});
+function startPolling(){stopPolling();check();timer=setInterval(check,3000)}
+function stopPolling(){if(timer){clearInterval(timer);timer=null}}
+async function check(){if(!txId)return;try{const r=await fetch('/api/checkout/payment/'+encodeURIComponent(txId));if(!r.ok)return;const d=await r.json();
+  if(d.status==='PAID'){stopPolling();statusEl.textContent='Pagamento confirmado!';statusEl.className='status ok';setTimeout(()=>location.href='/obrigado?transaction_id='+encodeURIComponent(txId),600);return}
+  if(['EXPIRED','FAILED','CANCELED','REFUNDED','CHARGEBACK'].includes(d.status)){stopPolling();statusEl.textContent='Pagamento: '+d.status;statusEl.className='status err';return}
+  statusEl.textContent='Aguardando confirmação do pagamento...';
+}catch{}}
+</script>
+</body>
+</html>
