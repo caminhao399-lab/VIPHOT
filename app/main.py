@@ -24,6 +24,8 @@ from telegram.ext import (
     filters,
 )
 
+from app.checkout import router as checkout_router
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -44,8 +46,6 @@ PLANS = {
     "full": {"name": "Acesso Full + Bônus", "amount_cents": 2390},
 }
 
-# In-memory task registry. Payment state itself is kept at BravoPay and can be
-# recovered by GET /transactions/{id}; no card or CPF is stored here.
 payment_tasks: dict[str, asyncio.Task] = {}
 
 
@@ -167,7 +167,7 @@ async def notify_paid(application: Application, chat_id: int, tx: dict[str, Any]
 
 async def poll_payment(application: Application, chat_id: int, tx_id: str) -> None:
     try:
-        for _ in range(360):  # up to 60 minutes, matching the PIX expiration
+        for _ in range(360):
             await asyncio.sleep(10)
             try:
                 tx = await get_transaction(tx_id)
@@ -384,6 +384,8 @@ async def handle_webhook(request: Request) -> JSONResponse:
             )
         except Exception:
             log.exception("Falha ao avisar usuário pelo webhook")
+    else:
+        log.info("BravoPay transaction.paid recebido para checkout web: %s", external_reference)
 
     return JSONResponse({"ok": True})
 
@@ -404,8 +406,6 @@ async def lifespan(app: FastAPI):
     telegram_app.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check:"))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details))
 
-    # Cleanly use polling for this first deployment. Removing any previous
-    # webhook prevents the classic Telegram getUpdates/webhook conflict.
     await telegram_app.initialize()
     await telegram_app.bot.delete_webhook(drop_pending_updates=False)
     await telegram_app.start()
@@ -419,7 +419,8 @@ async def lifespan(app: FastAPI):
     await telegram_app.shutdown()
 
 
-app = FastAPI(title="VIPHOT", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="VIPHOT", version="1.1.0", lifespan=lifespan)
+app.include_router(checkout_router)
 
 
 @app.get("/")
