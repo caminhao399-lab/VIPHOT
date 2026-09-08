@@ -47,6 +47,7 @@ PLANS = {
 }
 
 payment_tasks: dict[str, asyncio.Task] = {}
+telegram_app: Application | None = None
 
 
 def money(cents: int) -> str:
@@ -83,7 +84,13 @@ def payment_keyboard(tx_id: str) -> InlineKeyboardMarkup:
     )
 
 
-async def bravo_request(method: str, path: str, *, json: Any | None = None, headers: dict[str, str] | None = None) -> tuple[int, Any]:
+async def bravo_request(
+    method: str,
+    path: str,
+    *,
+    json: Any | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
     if not BRAVOPAY_API_KEY:
         raise RuntimeError("BRAVOPAY_API_KEY não configurada no Render")
 
@@ -109,7 +116,13 @@ async def bravo_request(method: str, path: str, *, json: Any | None = None, head
         return response.status_code, data
 
 
-async def create_pix(plan_key: str, chat_id: int, name: str, email: str, document: str) -> dict[str, Any]:
+async def create_pix(
+    plan_key: str,
+    chat_id: int,
+    name: str,
+    email: str,
+    document: str,
+) -> dict[str, Any]:
     plan = PLANS[plan_key]
     order_id = f"viphot:{chat_id}:{uuid.uuid4().hex[:16]}"
     payload: dict[str, Any] = {
@@ -296,7 +309,7 @@ async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_photo(
             photo=image,
             caption=(
-                f"💳 PIX gerado\n\n"
+                "💳 PIX gerado\n\n"
                 f"Plano: {plan['name']}\n"
                 f"Valor: {money(plan['amount_cents'])}\n\n"
                 "Escaneie o QR Code ou copie o código abaixo.\n"
@@ -364,40 +377,45 @@ async def handle_webhook(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
 
-    if event.get("type") != "transaction.paid":
+    event_type = event.get("type") or event.get("event")
+    if event_type != "transaction.paid":
         return JSONResponse({"ok": True})
 
-    tx = event.get("data") or {}
+    tx = event.get("data") or event.get("transaction") or {}
     external_reference = str(tx.get("external_reference", ""))
     match = re.match(r"^viphot:(-?\d+):", external_reference)
     if match:
         chat_id = int(match.group(1))
-        try:
-            await telegram_app.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    "✅ PAGAMENTO CONFIRMADO!\n\n"
-                    f"Valor: {money(int(tx.get('amount_cents', 0) or 0))}\n"
-                    f"Transação: {tx.get('id', '')}\n\n"
-                    "A confirmação foi recebida diretamente da BravoPay."
-                ),
-            )
-        except Exception:
-            log.exception("Falha ao avisar usuário pelo webhook")
+        if telegram_app is None:
+            log.warning("Pagamento confirmado, mas Telegram não está configurado para notificar o chat %s", chat_id)
+        else:
+            try:
+                await telegram_app.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "✅ PAGAMENTO CONFIRMADO!\n\n"
+                        f"Valor: {money(int(tx.get('amount_cents', 0) or 0))}\n"
+                        f"Transação: {tx.get('id', '')}\n\n"
+                        "A confirmação foi recebida diretamente da BravoPay."
+                    ),
+                )
+            except Exception:
+                log.exception("Falha ao avisar usuário pelo webhook")
     else:
         log.info("BravoPay transaction.paid recebido para checkout web: %s", external_reference)
 
     return JSONResponse({"ok": True})
 
 
-telegram_app: Application
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app
+
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN não configurado no Render")
+        telegram_app = None
+        log.warning("BOT_TOKEN não configurado; iniciando somente o servidor web/checkout")
+        yield
+        return
 
     telegram_app = Application.builder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
@@ -417,6 +435,7 @@ async def lifespan(app: FastAPI):
     await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
+    telegram_app = None
 
 
 app = FastAPI(title="VIPHOT", version="1.1.0", lifespan=lifespan)
