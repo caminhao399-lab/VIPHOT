@@ -28,10 +28,10 @@ BRAVOPAY_WEBHOOK_SECRET = os.getenv("BRAVOPAY_WEBHOOK_SECRET", "").strip()
 BRAVOPAY_BASE_URL = os.getenv("BRAVOPAY_BASE_URL", "https://bravopay.club/api/v1").strip().rstrip("/")
 
 PLANS = {
-    "essential": {"name": "VIP Essencial", "amount_cents": 800},
-    "premium": {"name": "VIP Premium", "amount_cents": 1490},
-    "acervo": {"name": "VIP Premium + Acervo", "amount_cents": 1690},
-    "full": {"name": "Acesso Full + Bônus", "amount_cents": 2390},
+    "essential": {"name": "VIP Essencial", "amount_cents": 1290},
+    "premium": {"name": "VIP Premium", "amount_cents": 1890},
+    "acervo": {"name": "VIP Premium + Acervo", "amount_cents": 2090},
+    "full": {"name": "Acesso Full + Bônus", "amount_cents": 2990},
 }
 
 payment_tasks: dict[str, asyncio.Task] = {}
@@ -44,10 +44,10 @@ def money(cents: int) -> str:
 
 def plans_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 VIP Essencial — R$ 8,00", callback_data="plan:essential")],
-        [InlineKeyboardButton("🔴 VIP Premium — R$ 14,90", callback_data="plan:premium")],
-        [InlineKeyboardButton("🔒 VIP Premium + Acervo — R$ 16,90", callback_data="plan:acervo")],
-        [InlineKeyboardButton("🎁 Acesso Full + Bônus — R$ 23,90", callback_data="plan:full")],
+        [InlineKeyboardButton("🟢 VIP Essencial — R$ 12,90", callback_data="plan:essential")],
+        [InlineKeyboardButton("🔴 VIP Premium — R$ 18,90", callback_data="plan:premium")],
+        [InlineKeyboardButton("⭐ VIP Premium + Acervo — R$ 20,90", callback_data="plan:acervo")],
+        [InlineKeyboardButton("👑 Acesso Full + Bônus — R$ 29,90", callback_data="plan:full")],
         [InlineKeyboardButton("⬅️ Voltar", callback_data="back")],
     ])
 
@@ -110,13 +110,12 @@ async def get_transaction(tx_id: str) -> dict[str, Any]:
 
 
 async def notify_paid(application: Application, chat_id: int, tx: dict[str, Any]) -> None:
-    tx_id = str(tx.get("id", ""))
     amount = int(tx.get("amount_cents", 0) or 0)
     await application.bot.send_message(chat_id=chat_id, text=(
         "✅ PAGAMENTO CONFIRMADO!\n\n"
-        f"Valor: {money(amount)}\n"
-        f"Transação: {tx_id}\n\n"
-        "Seu pagamento foi confirmado pela BravoPay."
+        f"Valor: {money(amount)}\n\n"
+        "Seu pagamento foi confirmado com sucesso.\n"
+        "A liberação do acesso será realizada após a confirmação do sistema."
     ))
 
 
@@ -154,14 +153,18 @@ async def assinar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.message:
         return
     context.user_data.clear()
-    await update.message.reply_text("⭐ <b>Assinar acesso VIP</b>\n\nEscolha seu plano:", reply_markup=plans_keyboard(), parse_mode="HTML")
+    await update.message.reply_text(
+        "⭐ <b>Assinar acesso VIP</b>\n\nEscolha seu plano:",
+        reply_markup=plans_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 async def meu_acesso(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.message:
         return
     await update.message.reply_text(
-        "📅 <b>Meu acesso</b>\n\nSeu acesso é atualizado após a confirmação do pagamento.\nSe você acabou de pagar, aguarde a confirmação da BravoPay.",
+        "📅 <b>Meu acesso</b>\n\nSeu acesso é atualizado após a confirmação do pagamento.\nSe você acabou de pagar, aguarde a confirmação.",
         parse_mode="HTML",
         reply_markup=menu_keyboard(),
     )
@@ -172,7 +175,11 @@ async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not query:
         return
     await query.answer()
-    await query.edit_message_text("⭐ <b>Assinar acesso VIP</b>\n\nEscolha seu plano:", reply_markup=plans_keyboard(), parse_mode="HTML")
+    await query.edit_message_text(
+        "⭐ <b>Assinar acesso VIP</b>\n\nEscolha seu plano:",
+        reply_markup=plans_keyboard(),
+        parse_mode="HTML",
+    )
 
 
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -181,7 +188,7 @@ async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     await query.answer()
     await query.edit_message_text(
-        "📅 <b>Meu acesso</b>\n\nSeu acesso é atualizado após a confirmação do pagamento.\nSe você acabou de pagar, aguarde a confirmação da BravoPay.",
+        "📅 <b>Meu acesso</b>\n\nSeu acesso é atualizado após a confirmação do pagamento.\nSe você acabou de pagar, aguarde a confirmação.",
         reply_markup=menu_keyboard(),
         parse_mode="HTML",
     )
@@ -193,7 +200,10 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await query.answer()
     context.user_data.clear()
-    await query.edit_message_text("🔞 Área exclusiva para maiores de 18 anos.\n\nEscolha uma opção:", reply_markup=menu_keyboard())
+    await query.edit_message_text(
+        "🔞 Área exclusiva para maiores de 18 anos.\n\nEscolha uma opção:",
+        reply_markup=menu_keyboard(),
+    )
 
 
 async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -207,19 +217,23 @@ async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     plan = PLANS[plan_key]
-    await query.edit_message_text(f"⏳ Gerando seu PIX pela BravoPay...\n\nPlano: {plan['name']}\nValor: {money(plan['amount_cents'])}")
+    await query.edit_message_text(
+        f"⏳ Gerando seu PIX...\n\nPlano: {plan['name']}\nValor: {money(plan['amount_cents'])}"
+    )
     try:
         tx = await create_pix(plan_key, update.effective_chat.id)
     except Exception as exc:
         log.exception("Erro ao criar PIX")
-        await query.message.reply_text(f"❌ Não foi possível gerar o PIX agora.\n\nMotivo retornado pela integração: {exc}\n\nTente novamente em /assinar.")
+        await query.message.reply_text(
+            f"❌ Não foi possível gerar o PIX agora.\n\nMotivo retornado pela integração: {exc}\n\nTente novamente em /assinar."
+        )
         return
 
     tx_id = str(tx.get("id", ""))
     copy_paste = ((tx.get("pix") or {}).get("copy_paste") or "").strip()
     if not tx_id or not copy_paste:
         log.error("Resposta BravoPay sem tx.id ou pix.copy_paste")
-        await query.message.reply_text("❌ A BravoPay não retornou os dados completos do PIX. Tente novamente.")
+        await query.message.reply_text("❌ A integração não retornou os dados completos do PIX. Tente novamente.")
         return
 
     qr = qrcode.make(copy_paste)
@@ -227,11 +241,24 @@ async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     qr.save(image, format="PNG")
     image.seek(0)
 
-    await query.message.reply_text("PIX gerado com sucesso ✅\n\n" f"Plano: {plan['name']}\n\n" f"Valor: {money(plan['amount_cents'])}")
-    await query.message.reply_text("✅ Como realizar o pagamento:\n\n1. Abra o aplicativo do seu banco.\n2. Selecione “Pagar” ou “PIX”.\n3. Escolha “PIX Copia e Cola”.\n4. Cole a chave da mensagem abaixo...")
+    await query.message.reply_text(
+        "PIX gerado com sucesso ✅\n\n"
+        f"Plano: {plan['name']}\n\n"
+        f"Valor: {money(plan['amount_cents'])}"
+    )
+    await query.message.reply_text(
+        "✅ Como realizar o pagamento:\n\n"
+        "1. Abra o aplicativo do seu banco.\n"
+        "2. Selecione “Pagar” ou “PIX”.\n"
+        "3. Escolha “PIX Copia e Cola”.\n"
+        "4. Cole a chave da mensagem abaixo..."
+    )
     await query.message.reply_text("Copie o código abaixo:")
     await query.message.reply_text(f"<code>{copy_paste}</code>", parse_mode="HTML")
-    await query.message.reply_text("Após efetuar o pagamento, clique no botão abaixo 👇", reply_markup=payment_keyboard(tx_id, copy_paste))
+    await query.message.reply_text(
+        "Após efetuar o pagamento, clique no botão abaixo 👇",
+        reply_markup=payment_keyboard(tx_id, copy_paste),
+    )
     await query.message.reply_photo(photo=image, caption="📲 QR Code do PIX")
 
     context.user_data.clear()
@@ -243,7 +270,7 @@ async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     if not query or not update.effective_chat:
         return
-    await query.answer("Consultando a BravoPay...")
+    await query.answer("Consultando o status...")
     tx_id = query.data.split(":", 1)[1]
     try:
         tx = await get_transaction(tx_id)
@@ -298,9 +325,9 @@ async def handle_webhook(request: Request) -> JSONResponse:
             try:
                 await telegram_app.bot.send_message(chat_id=chat_id, text=(
                     "✅ PAGAMENTO CONFIRMADO!\n\n"
-                    f"Valor: {money(int(tx.get('amount_cents', 0) or 0))}\n"
-                    f"Transação: {tx.get('id', '')}\n\n"
-                    "A confirmação foi recebida diretamente da BravoPay."
+                    f"Valor: {money(int(tx.get('amount_cents', 0) or 0))}\n\n"
+                    "Seu pagamento foi confirmado com sucesso.\n"
+                    "A liberação do acesso será realizada após a confirmação do sistema."
                 ))
             except Exception:
                 log.exception("Falha ao avisar usuário pelo webhook")
