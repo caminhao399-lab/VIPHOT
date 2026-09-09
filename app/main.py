@@ -5,9 +5,11 @@ import io
 import logging
 import os
 import re
+import sqlite3
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -26,6 +28,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 BRAVOPAY_API_KEY = os.getenv("BRAVOPAY_API_KEY", "").strip()
 BRAVOPAY_WEBHOOK_SECRET = os.getenv("BRAVOPAY_WEBHOOK_SECRET", "").strip()
 BRAVOPAY_BASE_URL = os.getenv("BRAVOPAY_BASE_URL", "https://bravopay.club/api/v1").strip().rstrip("/")
+VIDEO_FILE_ID = os.getenv("VIDEO_FILE_ID", "").strip()
+DB_PATH = os.getenv("DB_PATH", "/tmp/viphot.sqlite3").strip()
 
 PLANS = {
     "essential": {"name": "VIP Essencial", "amount_cents": 1290},
@@ -35,11 +39,52 @@ PLANS = {
 }
 
 payment_tasks: dict[str, asyncio.Task] = {}
+reminder_tasks: dict[int, asyncio.Task] = {}
 telegram_app: Application | None = None
 
 
 def money(cents: int) -> str:
     return f"R$ {cents / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE IF NOT EXISTS reminder_state (telegram_id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, stopped INTEGER NOT NULL DEFAULT 0)")
+    conn.commit()
+    return conn
+
+
+def reminder_start(user_id: int) -> None:
+    with closing(db()) as conn:
+        conn.execute("INSERT OR REPLACE INTO reminder_state(telegram_id, started_at, stopped) VALUES(?,?,0)", (user_id, datetime.now(timezone.utc).isoformat()))
+        conn.commit()
+
+
+def reminder_stop(user_id: int) -> None:
+    with closing(db()) as conn:
+        conn.execute("UPDATE reminder_state SET stopped=1 WHERE telegram_id=?", (user_id,))
+        conn.commit()
+    task = reminder_tasks.pop(user_id, None)
+    if task and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+
+
+def reminder_is_stopped(user_id: int) -> bool:
+    with closing(db()) as conn:
+        row = conn.execute("SELECT stopped FROM reminder_state WHERE telegram_id=?", (user_id,)).fetchone()
+    return bool(row and row["stopped"])
+
+
+def reminder_elapsed_start(user_id: int) -> datetime | None:
+    with closing(db()) as conn:
+        row = conn.execute("SELECT started_at, stopped FROM reminder_state WHERE telegram_id=?", (user_id,)).fetchone()
+    if not row or row["stopped"]:
+        return None
+    try:
+        return datetime.fromisoformat(row["started_at"])
+    except ValueError:
+        return None
 
 
 def plans_keyboard() -> InlineKeyboardMarkup:
@@ -65,6 +110,85 @@ def payment_keyboard(tx_id: str, pix_code: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✅ Verificar Status", callback_data=f"check:{tx_id}")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="back")],
     ])
+
+
+def promo_text() -> str:
+    return ("<b>🔥 VOCÊ ESTÁ A UM CLIQUE DO CONTEÚDO VIP EXCLUSIVO</b> 😈\n\n"
+            "🟢 <b>OFERTA ESPECIAL DE LANÇAMENTO</b>\n\n"
+            "🌸 Criadoras adultas\n"
+            "⭐ Conteúdo exclusivo\n"
+            "🎥 Vídeos e atualizações frequentes\n"
+            "💋 Conteúdo sensual para maiores de 18\n"
+            "🔥 Conteúdo premium e novidades\n"
+            "🔒 Área privada para assinantes\n\n"
+            "🎁 <b>BÔNUS IMEDIATO APÓS A COMPRA</b>\n"
+            "• Novidades exclusivas\n"
+            "• Conteúdo premium adicional\n"
+            "• Atualizações para assinantes\n"
+            "• Acesso a materiais exclusivos\n\n"
+            "🌶️ <b>Conteúdo atualizado regularmente</b> ✅\n"
+            "🌶️ <b>Área VIP privada</b> ✅\n"
+            "🌶️ <b>Acesso liberado após o pagamento</b> ✅\n"
+            "🌶️ <b>Novidades frequentes</b> ✅\n\n"
+            "⚠️ <b>SERVIÇO EXCLUSIVO PARA MAIORES DE 18 ANOS.</b>\n\n"
+            "🚨 <b>ÚLTIMAS VAGAS DA OFERTA ESPECIAL</b>\n"
+            "<i>Entre agora e aproveite o acesso VIP.</i>")
+
+
+def reminder_text() -> str:
+    return ("👋 <b>Oi! Sua oferta VIP ainda está disponível.</b>\n\n"
+            "Você iniciou o acesso, mas ainda não concluiu a assinatura.\n\n"
+            "🔥 Aproveite a oferta especial enquanto estiver disponível.\n"
+            "⭐ Conteúdo exclusivo para adultos\n"
+            "🔒 Área privada para assinantes\n"
+            "🎁 Bônus e novidades para assinantes\n\n"
+            "⚠️ Serviço exclusivo para maiores de 18 anos.\n\n"
+            "Se quiser continuar, é só tocar em <b>⭐ Assinar acesso VIP</b>.")
+
+
+async def send_reminder(user_id: int) -> None:
+    if telegram_app is None or not VIDEO_FILE_ID or reminder_is_stopped(user_id):
+        return
+    try:
+        await telegram_app.bot.send_video(
+            chat_id=user_id,
+            video=VIDEO_FILE_ID,
+            caption=reminder_text(),
+            reply_markup=menu_keyboard(),
+        )
+    except Exception:
+        log.exception("Falha ao enviar lembrete para %s", user_id)
+
+
+async def reminder_worker(user_id: int) -> None:
+    try:
+        # Mesmo ciclo do hot: 30, 60, 90 e 120 minutos.
+        for delay_minutes in (30, 60, 90, 120):
+            started = reminder_elapsed_start(user_id)
+            if started is None:
+                return
+            target = started + timedelta(minutes=delay_minutes)
+            wait_seconds = max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
+            await asyncio.sleep(wait_seconds)
+            if reminder_is_stopped(user_id):
+                return
+            await send_reminder(user_id)
+        reminder_stop(user_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        log.exception("Reminder worker failed for %s", user_id)
+    finally:
+        if reminder_tasks.get(user_id) is asyncio.current_task():
+            reminder_tasks.pop(user_id, None)
+
+
+def start_reminders(user_id: int) -> None:
+    if telegram_app is None or not VIDEO_FILE_ID:
+        return
+    reminder_stop(user_id)
+    reminder_start(user_id)
+    reminder_tasks[user_id] = asyncio.create_task(reminder_worker(user_id))
 
 
 async def bravo_request(method: str, path: str, *, json: Any | None = None, headers: dict[str, str] | None = None) -> tuple[int, Any]:
@@ -110,6 +234,7 @@ async def get_transaction(tx_id: str) -> dict[str, Any]:
 
 
 async def notify_paid(application: Application, chat_id: int, tx: dict[str, Any]) -> None:
+    reminder_stop(chat_id)
     amount = int(tx.get("amount_cents", 0) or 0)
     await application.bot.send_message(chat_id=chat_id, text=(
         "✅ PAGAMENTO CONFIRMADO!\n\n"
@@ -143,10 +268,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_chat or not update.message:
         return
     context.user_data.clear()
-    await update.message.reply_text(
-        "🔞 Área exclusiva para maiores de 18 anos.\n\nBem-vindo ao VIPHOT. Escolha uma opção:",
-        reply_markup=menu_keyboard(),
-    )
+    start_reminders(update.effective_chat.id)
+    if VIDEO_FILE_ID:
+        await update.message.reply_video(video=VIDEO_FILE_ID, caption=promo_text(), reply_markup=menu_keyboard())
+    else:
+        await update.message.reply_text(promo_text(), reply_markup=menu_keyboard())
 
 
 async def assinar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -319,6 +445,7 @@ async def handle_webhook(request: Request) -> JSONResponse:
     match = re.match(r"^viphot:(-?\d+):", external_reference)
     if match:
         chat_id = int(match.group(1))
+        reminder_stop(chat_id)
         if telegram_app is None:
             log.warning("Pagamento confirmado, mas Telegram não está configurado para notificar o chat %s", chat_id)
         else:
@@ -364,15 +491,19 @@ async def lifespan(app: FastAPI):
         BotCommand("assinar", "Assinar acesso VIP"),
         BotCommand("meuacesso", "Consultar meu acesso"),
     ])
-    log.info("VIPHOT online | Telegram configured: True | BravoPay key configured: %s", bool(BRAVOPAY_API_KEY))
+    log.info("VIPHOT online | Telegram configured: True | BravoPay key configured: %s | Reminder video configured: %s", bool(BRAVOPAY_API_KEY), bool(VIDEO_FILE_ID))
     yield
+    for task in list(reminder_tasks.values()):
+        task.cancel()
+    await asyncio.gather(*reminder_tasks.values(), return_exceptions=True)
+    reminder_tasks.clear()
     await telegram_app.updater.stop()
     await telegram_app.stop()
     await telegram_app.shutdown()
     telegram_app = None
 
 
-app = FastAPI(title="VIPHOT", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="VIPHOT", version="1.3.0", lifespan=lifespan)
 app.include_router(checkout_router)
 app.add_api_route("/webhooks/bravopay", handle_webhook, methods=["POST"])
 
