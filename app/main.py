@@ -113,19 +113,25 @@ def payment_keyboard(tx_id: str, pix_code: str) -> InlineKeyboardMarkup:
 
 def promo_text() -> str:
     return ("<b>🔥 VOCÊ ESTÁ A UM CLIQUE DO CONTEÚDO VIP EXCLUSIVO</b> 😈\n\n"
-            "🟢 <b>OFERTA ESPECIAL</b>\n\n"
+            "🟢 <b>OFERTA ESPECIAL DE LANÇAMENTO</b>\n\n"
             "🌸 Criadoras adultas\n"
             "⭐ Conteúdo exclusivo\n"
             "🎥 Vídeos e atualizações frequentes\n"
             "💋 Conteúdo sensual para maiores de 18\n"
             "🔥 Conteúdo premium e novidades\n"
             "🔒 Área privada para assinantes\n\n"
-            "🎁 <b>BÔNUS APÓS A COMPRA</b>\n"
+            "🎁 <b>BÔNUS IMEDIATO APÓS A COMPRA</b>\n"
             "• Novidades exclusivas\n"
             "• Conteúdo premium adicional\n"
-            "• Atualizações para assinantes\n\n"
+            "• Atualizações para assinantes\n"
+            "• Acesso a materiais exclusivos\n\n"
+            "🌶️ Conteúdo atualizado regularmente ✅\n"
+            "🌶️ Área VIP privada ✅\n"
+            "🌶️ Acesso liberado após o pagamento ✅\n"
+            "🌶️ Novidades frequentes ✅\n\n"
             "⚠️ <b>SERVIÇO EXCLUSIVO PARA MAIORES DE 18 ANOS.</b>\n\n"
-            "🚨 <b>APROVEITE A OFERTA ESPECIAL</b>")
+            "🚨 <b>ÚLTIMAS VAGAS DA OFERTA ESPECIAL</b>\n"
+            "Entre agora e aproveite o acesso VIP.")
 
 
 def reminder_text() -> str:
