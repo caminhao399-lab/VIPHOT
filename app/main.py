@@ -14,14 +14,12 @@ import httpx
 import qrcode
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, CopyTextButton
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    MessageHandler,
-    filters,
 )
 
 from app.checkout import router as checkout_router
@@ -54,19 +52,6 @@ def money(cents: int) -> str:
     return f"R$ {cents / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def clean_digits(value: str) -> str:
-    return re.sub(r"\D", "", value)
-
-
-def valid_document(value: str) -> bool:
-    digits = clean_digits(value)
-    return len(digits) in (11, 14)
-
-
-def valid_email(value: str) -> bool:
-    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value.strip()))
-
-
 def plans_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -74,13 +59,27 @@ def plans_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔴 VIP Premium — R$ 14,90", callback_data="plan:premium")],
             [InlineKeyboardButton("🔒 VIP Premium + Acervo — R$ 16,90", callback_data="plan:acervo")],
             [InlineKeyboardButton("🎁 Acesso Full + Bônus — R$ 23,90", callback_data="plan:full")],
+            [InlineKeyboardButton("⬅️ Voltar", callback_data="back")],
         ]
     )
 
 
-def payment_keyboard(tx_id: str) -> InlineKeyboardMarkup:
+def menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔄 Verificar pagamento", callback_data=f"check:{tx_id}")]]
+        [
+            [InlineKeyboardButton("⭐ Assinar acesso VIP", callback_data="buy")],
+            [InlineKeyboardButton("📅 Meu acesso", callback_data="status")],
+        ]
+    )
+
+
+def payment_keyboard(tx_id: str, pix_code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📋 Copiar Código", copy_text=CopyTextButton(text=pix_code))],
+            [InlineKeyboardButton("✅ Verificar Status", callback_data=f"check:{tx_id}")],
+            [InlineKeyboardButton("❌ Cancelar", callback_data="back")],
+        ]
     )
 
 
@@ -116,23 +115,12 @@ async def bravo_request(
         return response.status_code, data
 
 
-async def create_pix(
-    plan_key: str,
-    chat_id: int,
-    name: str,
-    email: str,
-    document: str,
-) -> dict[str, Any]:
+async def create_pix(plan_key: str, chat_id: int) -> dict[str, Any]:
     plan = PLANS[plan_key]
     order_id = f"viphot:{chat_id}:{uuid.uuid4().hex[:16]}"
     payload: dict[str, Any] = {
         "amount_cents": plan["amount_cents"],
         "method": "pix",
-        "customer": {
-            "name": name,
-            "email": email,
-            "cpf": clean_digits(document),
-        },
         "description": f"{plan['name']} - acesso 18+",
         "external_reference": order_id,
         "metadata": {
@@ -172,8 +160,7 @@ async def notify_paid(application: Application, chat_id: int, tx: dict[str, Any]
             "✅ PAGAMENTO CONFIRMADO!\n\n"
             f"Valor: {money(amount)}\n"
             f"Transação: {tx_id}\n\n"
-            "Seu pagamento foi confirmado pela BravoPay.\n"
-            "O próximo passo de liberação do acesso será configurado depois que o PIX estiver funcionando 100%."
+            "Seu pagamento foi confirmado pela BravoPay."
         ),
     )
 
@@ -195,7 +182,7 @@ async def poll_payment(application: Application, chat_id: int, tx_id: str) -> No
             if status in {"EXPIRED", "FAILED", "CANCELED", "REFUNDED", "CHARGEBACK"}:
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ O PIX ficou com status {status}. Use /start para gerar uma nova cobrança.",
+                    text=f"⚠️ O PIX ficou com status {status}. Use /assinar para gerar uma nova cobrança.",
                 )
                 return
     finally:
@@ -208,123 +195,136 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.clear()
     await update.message.reply_text(
         "🔞 Área exclusiva para maiores de 18 anos.\n\n"
-        "Escolha seu plano para gerar um PIX pela BravoPay:",
-        reply_markup=plans_keyboard(),
+        "Bem-vindo ao VIPHOT. Escolha uma opção:",
+        reply_markup=menu_keyboard(),
     )
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def assinar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.message:
+        return
     context.user_data.clear()
-    if update.message:
-        await update.message.reply_text("Operação cancelada. Use /start para começar novamente.")
+    await update.message.reply_text(
+        "⭐ <b>Assinar acesso VIP</b>\n\nEscolha seu plano:",
+        reply_markup=plans_keyboard(),
+        parse_mode="HTML",
+    )
 
 
-async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def meu_acesso(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.message:
+        return
+    await update.message.reply_text(
+        "📅 <b>Meu acesso</b>\n\n"
+        "Seu acesso é atualizado após a confirmação do pagamento.\n"
+        "Se você acabou de pagar, aguarde a confirmação da BravoPay.",
+        parse_mode="HTML",
+        reply_markup=menu_keyboard(),
+    )
+
+
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
         return
     await query.answer()
-    _, plan_key = query.data.split(":", 1)
-    if plan_key not in PLANS:
-        await query.edit_message_text("Plano inválido. Use /start novamente.")
-        return
-
-    context.user_data.clear()
-    context.user_data["plan"] = plan_key
-    context.user_data["step"] = "name"
-    plan = PLANS[plan_key]
     await query.edit_message_text(
-        f"Você escolheu: {plan['name']} — {money(plan['amount_cents'])}\n\n"
-        "Digite seu nome completo:\n\n"
-        "/cancel para cancelar."
+        "⭐ <b>Assinar acesso VIP</b>\n\nEscolha seu plano:",
+        reply_markup=plans_keyboard(),
+        parse_mode="HTML",
     )
 
 
-async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_chat:
+async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
         return
-    step = context.user_data.get("step")
-    text = (update.message.text or "").strip()
+    await query.answer()
+    await query.edit_message_text(
+        "📅 <b>Meu acesso</b>\n\n"
+        "Seu acesso é atualizado após a confirmação do pagamento.\n"
+        "Se você acabou de pagar, aguarde a confirmação da BravoPay.",
+        reply_markup=menu_keyboard(),
+        parse_mode="HTML",
+    )
 
-    if step == "name":
-        if len(text) < 3:
-            await update.message.reply_text("Digite seu nome completo.")
-            return
-        context.user_data["name"] = text[:120]
-        context.user_data["step"] = "email"
-        await update.message.reply_text("Agora digite seu e-mail:")
+
+async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    context.user_data.clear()
+    await query.edit_message_text(
+        "🔞 Área exclusiva para maiores de 18 anos.\n\n"
+        "Escolha uma opção:",
+        reply_markup=menu_keyboard(),
+    )
+
+
+async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not update.effective_chat:
+        return
+    await query.answer()
+    _, plan_key = query.data.split(":", 1)
+    if plan_key not in PLANS:
+        await query.edit_message_text("Plano inválido. Use /assinar novamente.")
         return
 
-    if step == "email":
-        if not valid_email(text):
-            await update.message.reply_text("E-mail inválido. Digite um e-mail válido:")
-            return
-        context.user_data["email"] = text.lower()[:200]
-        context.user_data["step"] = "document"
-        await update.message.reply_text("Digite seu CPF ou CNPJ (somente números ou com máscara):")
-        return
+    plan = PLANS[plan_key]
+    await query.edit_message_text(
+        f"⏳ Gerando seu PIX pela BravoPay...\n\n"
+        f"Plano: {plan['name']}\n"
+        f"Valor: {money(plan['amount_cents'])}"
+    )
 
-    if step == "document":
-        if not valid_document(text):
-            await update.message.reply_text("CPF/CNPJ inválido. Envie 11 dígitos (CPF) ou 14 dígitos (CNPJ):")
-            return
-
-        plan_key = context.user_data.get("plan")
-        if plan_key not in PLANS:
-            context.user_data.clear()
-            await update.message.reply_text("Sessão expirada. Use /start novamente.")
-            return
-
-        await update.message.reply_text("⏳ Gerando seu PIX pela BravoPay...")
-        try:
-            tx = await create_pix(
-                plan_key,
-                update.effective_chat.id,
-                context.user_data["name"],
-                context.user_data["email"],
-                text,
-            )
-        except Exception as exc:
-            log.exception("Erro ao criar PIX")
-            await update.message.reply_text(
-                "❌ Não foi possível gerar o PIX agora.\n\n"
-                f"Motivo retornado pela integração: {exc}\n\n"
-                "Tente novamente com /start."
-            )
-            return
-
-        tx_id = str(tx.get("id", ""))
-        copy_paste = ((tx.get("pix") or {}).get("copy_paste") or "").strip()
-        if not tx_id or not copy_paste:
-            log.error("Resposta BravoPay sem tx.id ou pix.copy_paste")
-            await update.message.reply_text("❌ A BravoPay não retornou os dados completos do PIX. Tente novamente.")
-            return
-
-        qr = qrcode.make(copy_paste)
-        image = io.BytesIO()
-        qr.save(image, format="PNG")
-        image.seek(0)
-
-        plan = PLANS[plan_key]
-        await update.message.reply_photo(
-            photo=image,
-            caption=(
-                "💳 PIX gerado\n\n"
-                f"Plano: {plan['name']}\n"
-                f"Valor: {money(plan['amount_cents'])}\n\n"
-                "Escaneie o QR Code ou copie o código abaixo.\n"
-                "Depois do pagamento, use o botão para verificar."
-            ),
-            reply_markup=payment_keyboard(tx_id),
+    try:
+        tx = await create_pix(plan_key, update.effective_chat.id)
+    except Exception as exc:
+        log.exception("Erro ao criar PIX")
+        await query.message.reply_text(
+            "❌ Não foi possível gerar o PIX agora.\n\n"
+            f"Motivo retornado pela integração: {exc}\n\n"
+            "Tente novamente em /assinar."
         )
-        await update.message.reply_text(f"<code>{copy_paste}</code>", parse_mode="HTML")
-
-        context.user_data.clear()
-        task = asyncio.create_task(poll_payment(context.application, update.effective_chat.id, tx_id))
-        payment_tasks[tx_id] = task
         return
 
-    await update.message.reply_text("Use /start para começar.")
+    tx_id = str(tx.get("id", ""))
+    copy_paste = ((tx.get("pix") or {}).get("copy_paste") or "").strip()
+    if not tx_id or not copy_paste:
+        log.error("Resposta BravoPay sem tx.id ou pix.copy_paste")
+        await query.message.reply_text("❌ A BravoPay não retornou os dados completos do PIX. Tente novamente.")
+        return
+
+    qr = qrcode.make(copy_paste)
+    image = io.BytesIO()
+    qr.save(image, format="PNG")
+    image.seek(0)
+
+    await query.message.reply_text(
+        "PIX gerado com sucesso ✅\n\n"
+        f"Plano: {plan['name']}\n\n"
+        f"Valor: {money(plan['amount_cents'])}"
+    )
+    await query.message.reply_text(
+        "✅ Como realizar o pagamento:\n\n"
+        "1. Abra o aplicativo do seu banco.\n"
+        "2. Selecione “Pagar” ou “PIX”.\n"
+        "3. Escolha “PIX Copia e Cola”.\n"
+        "4. Cole a chave da mensagem abaixo..."
+    )
+    await query.message.reply_text("Copie o código abaixo:")
+    await query.message.reply_text(f"<code>{copy_paste}</code>", parse_mode="HTML")
+    await query.message.reply_text(
+        "Após efetuar o pagamento, clique no botão abaixo 👇",
+        reply_markup=payment_keyboard(tx_id, copy_paste),
+    )
+    await query.message.reply_photo(photo=image, caption="📲 QR Code do PIX")
+
+    context.user_data.clear()
+    task = asyncio.create_task(poll_payment(context.application, update.effective_chat.id, tx_id))
+    payment_tasks[tx_id] = task
 
 
 async def check_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -419,15 +419,24 @@ async def lifespan(app: FastAPI):
 
     telegram_app = Application.builder().token(BOT_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("cancel", cancel))
+    telegram_app.add_handler(CommandHandler("assinar", assinar))
+    telegram_app.add_handler(CommandHandler("meuacesso", meu_acesso))
+    telegram_app.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy$"))
+    telegram_app.add_handler(CallbackQueryHandler(status_callback, pattern=r"^status$"))
+    telegram_app.add_handler(CallbackQueryHandler(back_callback, pattern=r"^back$"))
     telegram_app.add_handler(CallbackQueryHandler(choose_plan, pattern=r"^plan:"))
     telegram_app.add_handler(CallbackQueryHandler(check_payment, pattern=r"^check:"))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details))
 
     await telegram_app.initialize()
     await telegram_app.bot.delete_webhook(drop_pending_updates=False)
     await telegram_app.start()
     await telegram_app.updater.start_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
+
+    await telegram_app.bot.set_my_commands([
+        ("start", "Iniciar"),
+        ("assinar", "Assinar acesso VIP"),
+        ("meuacesso", "Consultar meu acesso"),
+    ])
 
     log.info("VIPHOT online | Telegram configured: True | BravoPay key configured: %s", bool(BRAVOPAY_API_KEY))
     yield
@@ -438,8 +447,9 @@ async def lifespan(app: FastAPI):
     telegram_app = None
 
 
-app = FastAPI(title="VIPHOT", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="VIPHOT", version="1.2.0", lifespan=lifespan)
 app.include_router(checkout_router)
+app.add_api_route("/webhooks/bravopay", handle_webhook, methods=["POST"])
 
 
 @app.get("/")
@@ -450,8 +460,3 @@ async def root() -> dict[str, str]:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@app.post("/webhooks/bravopay")
-async def bravopay_webhook(request: Request) -> JSONResponse:
-    return await handle_webhook(request)
